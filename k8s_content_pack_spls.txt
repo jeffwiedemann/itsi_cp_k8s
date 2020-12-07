@@ -1,0 +1,90 @@
+K8S Cluster Entity Creation Search
+
+`k8s_meta_index` sourcetype="kube:objects:pods"
+| dedup cluster_name "metadata.namespace"
+
+| appendpipe [| dedup cluster_name | eval entity_title=cluster_name | table entity_title cluster_name | eval entity_type="k8s_cluster"]
+| appendpipe [| dedup cluster_name, "metadata.namespace" | eval entity_title='metadata.namespace' | eval namespace='metadata.namespace' | table entity_title cluster_name, namespace | eval entity_type="k8s_namespace"]
+| search entity_type=k8s_cluster
+
+
+
+
+K8S Namespace Entity Creation Search
+
+`k8s_meta_index` sourcetype="kube:objects:pods"
+| dedup cluster_name "metadata.namespace"
+
+| appendpipe [| dedup cluster_name | eval entity_title=cluster_name | table entity_title cluster_name | eval entity_type="k8s_cluster"]
+| appendpipe [| dedup cluster_name, "metadata.namespace" | eval entity_title='metadata.namespace' | eval namespace='metadata.namespace' | table entity_title cluster_name, namespace | eval entity_type="k8s_namespace"]
+| search entity_type=k8s_namespace
+
+
+
+
+K8S Pods Entity Enrichment Search
+
+`k8s_meta_index` sourcetype="kube:objects:pods"
+| dedup cluster_name metadata.name metadata.namespace spec.containers{}.name spec.nodeName 
+| eval namespace = mvdedup('metadata.namespace'), nodeName = mvdedup('spec.nodeName'), podName = mvdedup('metadata.name'), containerName = mvdedup('spec.containers{}.name')
+| stats count by cluster_name nodeName namespace podName
+| rename podName as pod_name, namespace as pod_namespace
+| eval entity_title=pod_name
+
+| lookup itsi_entities title as entity_title OUTPUT _key as key
+| search key=*
+| table entity_title pod_name pod_namespace
+
+
+
+
+Automated Service Tree Creation Search
+
+`k8s_meta_index` sourcetype="kube:objects:pods" 
+| dedup cluster_name metadata.name metadata.namespace spec.containers{}.name spec.nodeName 
+| eval namespace = mvdedup('metadata.namespace'), nodeName = mvdedup('spec.nodeName'), podName = mvdedup('metadata.name'), containerName = mvdedup('spec.containers{}.name') 
+| table cluster_name nodeName namespace podName containerName 
+| mvexpand containerName 
+
+| eval prefix_cluster="", prefix_node=cluster_name.":", prefix_namespace=cluster_name.":"
+    
+| appendpipe 
+    [ stats count by cluster_name, namespace, prefix_cluster, prefix_node, prefix_namespace
+    | eval final_service = namespace
+    | eval template="K8s:Namespace:Template"
+    | eval final_service = prefix_namespace.final_service, type="namespace"]
+
+| appendpipe 
+    [ stats count by cluster_name, nodeName, prefix_cluster, prefix_node, prefix_namespace
+    | eval final_service = cluster_name, final_dependency = nodeName
+    | eval template="K8s:Cluster:Template"
+    | eval final_service = prefix_cluster.final_service, final_dependency = prefix_node.final_dependency, type="cluster"]
+    
+| appendpipe 
+    [ stats count by cluster_name, nodeName, namespace, prefix_cluster, prefix_node, prefix_namespace
+    | eval final_service = nodeName, final_dependency = namespace
+    | eval template="K8s:Node:Template"
+    | eval final_service = prefix_node.final_service, final_dependency = prefix_namespace.final_dependency, type="node"]
+    
+| search final_service=*
+| rename final_service as "Service Title", final_dependency as "Dependent Services", template as "Service Template Link", nodeName as "node"
+| table "Service Title" "Dependent Services" "Service Template Link" cluster_name node namespace
+
+
+
+
+K8S Correlation Search for Platform Notable Events
+
+`k8s_meta_index` sourcetype="kube:objects:events"
+| rename object.* as *
+| search type!=Normal
+| eval itsi_severity=case(type="Normal",2,type="Warning",5,type="Error",6, 1=1,type) 
+| eval itsi_orig_severity=type 
+| eval itsi_orig_reason=reason 
+| eval itsi_orig_message=message 
+| eval itsi_orig_object_name='involvedObject.name' 
+| eval itsi_orig_object_kind='involvedObject.kind' 
+| eval itsi_orig_object_namespace='involvedObject.namespace' 
+| eval itsi_orig_object_cluster_name=cluster_name
+| eval itsi_entity_title=coalesce(itsi_orig_object_namespace, cluster_name)
+| eval itsi_entity_title=if(itsi_orig_object_kind="Node", itsi_orig_object_name, itsi_entity_title)
